@@ -102,7 +102,7 @@ var DB = {"GROUPS":[{"id":"A","name":"第一部分 · 安全生产与职业健�
 var LETTERS = ['A','B','C','D','E','F'];
 var S = {
   progress: load('p', {}), wrong: load('w', {}), fav: load('f', []), logs: load('l', []),
-  setting: load('s', { autoNext: true, examCount: 50, examMinutes: 30 })
+  setting: load('s', { autoNext: false, examCount: 50, examMinutes: 30 })
 };
 function load(k, d) { try { var v = localStorage.getItem('hse_' + k); return v ? JSON.parse(v) : d } catch (e) { return d } }
 function save(k, v) { try { localStorage.setItem('hse_' + k, JSON.stringify(v)) } catch (e) {} }
@@ -116,11 +116,24 @@ function recordAnswer(q, right) {
   if (p.doneIds.indexOf(q.id) < 0) p.doneIds.push(q.id);
   if (right) { if (p.correctIds.indexOf(q.id) < 0) p.correctIds.push(q.id) }
   else { var i = p.correctIds.indexOf(q.id); if (i >= 0) p.correctIds.splice(i, 1) }
-  if (!S.wrong[q.id]) S.wrong[q.id] = { wrongCount: 0, rightCount: 0, mastered: false };
-  if (right) { S.wrong[q.id].rightCount++; if (S.wrong[q.id].rightCount >= 2) S.wrong[q.id].mastered = true }
-  else { S.wrong[q.id].wrongCount++; S.wrong[q.id].rightCount = 0; S.wrong[q.id].mastered = false }
+  // 只有答错的题才进错题本；答对时仅更新"曾经错过的题"的连对计数
+  if (!right) {
+    if (!S.wrong[q.id]) S.wrong[q.id] = { wrongCount: 0, rightCount: 0, mastered: false };
+    S.wrong[q.id].wrongCount++; S.wrong[q.id].rightCount = 0; S.wrong[q.id].mastered = false;
+  } else if (S.wrong[q.id]) {
+    S.wrong[q.id].rightCount++; if (S.wrong[q.id].rightCount >= 2) S.wrong[q.id].mastered = true;
+  }
   saveAll();
 }
+/* 存量数据修复：旧版本把答对的题也写进了错题本（wrongCount 为 0 的条目），这里清掉 */
+(function migrateLegacyData() {
+  var changed = false;
+  Object.keys(S.wrong).forEach(function (id) {
+    if (!S.wrong[id] || !S.wrong[id].wrongCount) { delete S.wrong[id]; changed = true }
+  });
+  if (S.setting.autoNext) { S.setting.autoNext = false; changed = true }
+  if (changed) saveAll();
+})();
 function shuffle(a) { a = a.slice(); for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t } return a }
 
 var view = 'index', groupsOpen = {}, quiz = null, lastSession = null;
@@ -211,7 +224,6 @@ function answer(i) {
   quiz.selected = i; if (right) quiz.correct++; else { quiz.wrong++; quiz.wrongIds.push(q.id) }
   recordAnswer(q, right);
   if (quiz.exam) quiz.show = false; else quiz.show = true;
-  if (!quiz.exam && S.setting.autoNext) { setTimeout(function () { next() }, 1200) }
   render();
 }
 function next() {
