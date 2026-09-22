@@ -138,12 +138,13 @@ var PAPER_RANGES = [
   { from: 'A25', to: 'B19' }, { from: 'C01', to: 'D17' }
 ];
 /* ===== 成绩上报（后台统计）=====
-   endpoint 填上后自动启用；为空则不上报，一切照旧。
-   mode='webhook'：适用于企微/飞书/钉钉群机器人、多维表格 Webhook（no-cors + text/plain，无需预检）
-   mode='rest'   ：适用于 Supabase / CloudBase / 自建服务（普通 JSON POST，可读返回） */
+   mode 取值：
+     'feishu-bot' / 'wecom-bot'  → 群机器人（响应可读，能确认送达，推荐）
+     'webhook'                   → 飞书多维表格/自动化类 webhook（响应不可读，只能盲发）
+     'rest'                      → Supabase / CloudBase / 自建服务（普通 JSON POST） */
 var REPORT = {
-  endpoint: 'https://b8ijl3262y.feishu.cn/base/automation/webhook/event/MaEaa5PN9w6g2thhg92c9gjZndg',
-  mode: 'webhook',
+  endpoint: 'https://open.feishu.cn/open-apis/bot/v2/hook/53a3923c-fb5b-439d-b804-45315323878d',
+  mode: 'feishu-bot',
   on: true
 };
 var S = {
@@ -192,6 +193,7 @@ function recordAnswer(q, right) {
   if (rp.sent === undefined) { rp.sent = 0; changed = true }
   if (rp.name === undefined) { rp.name = ''; changed = true }
   if (rp.dev === undefined) { rp.dev = ''; changed = true }
+  if (rp.lastNote === undefined) { rp.lastNote = ''; changed = true }
   S.report = rp
   if (changed) saveAll();
 })();
@@ -321,25 +323,46 @@ function pushReport(rec) {
   S.report.queue.push(rec); saveAll();
   flushReports();
 }
+function botText(r) {
+  return '【HSE刷题】' + (r.name || '匿名同事') + ' 完成 ' + (r.title || '') + '\n' +
+    '类型：' + r.typeName + '｜答对 ' + r.correct + '/' + r.total + (r.score == null ? '' : '（' + r.score + ' 分）') + '\n' +
+    '用时：' + r.useTime + '｜结果：' + r.result + '（第 ' + (r.attempt || 1) + ' 次）';
+}
+function reportBody(rec) {
+  if (REPORT.mode === 'feishu-bot') return JSON.stringify({ msg_type: 'text', content: { text: botText(rec) } });
+  if (REPORT.mode === 'wecom-bot') return JSON.stringify({ msgtype: 'text', text: { content: botText(rec) } });
+  return JSON.stringify(rec);
+}
 function flushReports() {
   if (!reportEnabled() || S.report.sending || !S.report.queue.length) return;
   S.report.sending = true;
-  var rec = S.report.queue[0], body = JSON.stringify(rec);
-  var finish = function (ok) {
+  var rec = S.report.queue[0], body = reportBody(rec), m = REPORT.mode;
+  var finish = function (ok, note) {
     S.report.sending = false;
-    if (ok) { S.report.queue.shift(); S.report.sent = (S.report.sent || 0) + 1; saveAll() }
+    if (note) S.report.lastNote = note;
+    if (ok) { S.report.queue.shift(); S.report.sent = (S.report.sent || 0) + 1 }
+    saveAll();
     if (S.report.queue.length) setTimeout(flushReports, ok ? 300 : 5000);
   };
   try {
-    if (REPORT.mode === 'webhook') {
+    if (m === 'webhook') {
       /* no-cors：响应不可读，未抛异常即视为送达；失败会留在本地队列下次重试 */
       fetch(REPORT.endpoint, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: body })
-        .then(function () { finish(true) }).catch(function () { finish(false) });
+        .then(function () { finish(true, '已发出（无法回读结果）') }).catch(function () { finish(false, '网络异常') });
     } else {
+      /* 群机器人 / REST：响应可读，能真正确认送达 */
       fetch(REPORT.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body })
-        .then(function (r) { finish(r.ok) }).catch(function () { finish(false) });
+        .then(function (r) {
+          return r.text().then(function (t) {
+            var j = null; try { j = JSON.parse(t) } catch (e) {}
+            var code = j ? (j.code !== undefined ? j.code : j.errcode) : undefined;
+            var ok = r.ok && (code === undefined ? true : code === 0);
+            finish(ok, (j && (j.msg || j.errmsg)) || ('HTTP ' + r.status));
+          });
+        })
+        .catch(function (e) { finish(false, '网络异常: ' + (e && e.message)) });
     }
-  } catch (e) { finish(false) }
+  } catch (e) { finish(false, '异常') }
 }
 function reportCard() {
   var n = S.report.queue.length;
@@ -349,6 +372,7 @@ function reportCard() {
   h += '<div class="sub" style="margin-top:8px">昵称（管理员在后台靠它认出你）</div>';
   h += '<div class="row" style="margin-top:8px"><input id="rnick" class="nick" placeholder="填姓名或昵称" value="' + nm + '"><div class="btn" style="width:86px;padding:10px 0;flex:none;margin-left:8px" data-savenick="1">保存</div></div>';
   h += '<div class="sub" style="margin-top:8px">上报内容：昵称、关卡/阶段、对错题数、用时、是否通过。不含手机号等隐私信息。</div>';
+  if (REPORT.mode !== 'webhook' && S.report.lastNote) h += '<div class="sub" style="margin-top:6px">最近一次发送：' + S.report.lastNote + '</div>';
   return h + '</div>';
 }
 /* ---------- 打怪地图 ---------- */
