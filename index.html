@@ -145,6 +145,9 @@ var PAPER_RANGES = [
 var REPORT = {
   endpoint: 'https://open.feishu.cn/open-apis/bot/v2/hook/a38a3a3e-d113-4be0-b916-639ecb3bff29',
   mode: 'feishu-bot',
+  /* 可选：额外把原始 JSON 再发一份到多维表格 webhook（盲发，不影响主通道）
+     填入多维表格自动化地址后自动开启，留空则关闭 */
+  mirror: 'https://b8ijl3262y.feishu.cn/base/automation/webhook/event/MaEaa5PN9w6g2thhg92c9gjZndg',
   on: true
 };
 var S = {
@@ -194,6 +197,7 @@ function recordAnswer(q, right) {
   if (rp.name === undefined) { rp.name = ''; changed = true }
   if (rp.dev === undefined) { rp.dev = ''; changed = true }
   if (rp.lastNote === undefined) { rp.lastNote = ''; changed = true }
+  if (rp.mirrorSent === undefined) { rp.mirrorSent = 0; changed = true }
   S.report = rp
   if (changed) saveAll();
 })();
@@ -320,6 +324,7 @@ function pushReport(rec) {
   rec.result = rec.passed ? '通过' : '未通过';
   rec.useTime = Math.floor((rec.seconds || 0) / 60) + '分' + ((rec.seconds || 0) % 60) + '秒';
   rec.reasonText = rec.reason === 'timeout' ? '超时未完成' : rec.reason === 'impossible' ? '错题超出上限' : '正常完成';
+  rec.mirrored = false;
   S.report.queue.push(rec); saveAll();
   flushReports();
 }
@@ -333,10 +338,21 @@ function reportBody(rec) {
   if (REPORT.mode === 'wecom-bot') return JSON.stringify({ msgtype: 'text', text: { content: botText(rec) } });
   return JSON.stringify(rec);
 }
+function mirrorReport(rec) {
+  if (!REPORT.mirror || !REPORT.on || rec.mirrored) return;
+  rec.mirrored = true;
+  saveAll();
+  try {
+    fetch(REPORT.mirror, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(rec) })
+      .then(function () { S.report.mirrorSent = (S.report.mirrorSent || 0) + 1; saveAll() })
+      .catch(function () { rec.mirrored = false; saveAll() });
+  } catch (e) { rec.mirrored = false }
+}
 function flushReports() {
   if (!reportEnabled() || S.report.sending || !S.report.queue.length) return;
   S.report.sending = true;
   var rec = S.report.queue[0], body = reportBody(rec), m = REPORT.mode;
+  mirrorReport(rec);
   var finish = function (ok, note) {
     S.report.sending = false;
     if (note) S.report.lastNote = note;
@@ -373,6 +389,7 @@ function reportCard() {
   h += '<div class="row" style="margin-top:8px"><input id="rnick" class="nick" placeholder="填姓名或昵称" value="' + nm + '"><div class="btn" style="width:86px;padding:10px 0;flex:none;margin-left:8px" data-savenick="1">保存</div></div>';
   h += '<div class="sub" style="margin-top:8px">上报内容：昵称、关卡/阶段、对错题数、用时、是否通过。不含手机号等隐私信息。</div>';
   if (REPORT.mode !== 'webhook' && S.report.lastNote) h += '<div class="sub" style="margin-top:6px">最近一次发送：' + S.report.lastNote + '</div>';
+  if (REPORT.mirror) h += '<div class="sub" style="margin-top:4px">台账写入已开启（已投 ' + (S.report.mirrorSent || 0) + ' 条）</div>';
   return h + '</div>';
 }
 /* ---------- 打怪地图 ---------- */
