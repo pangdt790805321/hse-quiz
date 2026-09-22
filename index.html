@@ -85,6 +85,7 @@
   .scorebig { font-size: 54px; font-weight: 800; color: #1a5fb4; margin: 6px 0 2px; }
   .scorebig span { font-size: 16px; margin-left: 4px; color: #6b7684; font-weight: 400; }
   .mini { display: inline-block; font-size: 11px; padding: 3px 8px; border-radius: 6px; background: #fff7e6; color: #a9721b; border: 1px solid #f0c36d; white-space: nowrap; }
+  .nick { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid #dfe6ef; border-radius: 8px; font-size: 14px; font-family: inherit; color: #1f2733; }
   html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .opt, .ch, .tabbar div, .btn, .optgrid div, .group { -webkit-tap-highlight-color: rgba(26,95,180,.12); }
   /* ===== 手机端自适应：把 400px 桌面预览壳改为全屏 App 布局 ===== */
@@ -136,14 +137,24 @@ var PAPER_RANGES = [
   { from: 'A01', to: 'A09' }, { from: 'A10', to: 'A24' },
   { from: 'A25', to: 'B19' }, { from: 'C01', to: 'D17' }
 ];
+/* ===== 成绩上报（后台统计）=====
+   endpoint 填上后自动启用；为空则不上报，一切照旧。
+   mode='webhook'：适用于企微/飞书/钉钉群机器人、多维表格 Webhook（no-cors + text/plain，无需预检）
+   mode='rest'   ：适用于 Supabase / CloudBase / 自建服务（普通 JSON POST，可读返回） */
+var REPORT = {
+  endpoint: 'https://b8ijl3262y.feishu.cn/base/automation/webhook/event/UYs6apa7iweZOUhjUhjc9lAWneb',
+  mode: 'webhook',
+  on: true
+};
 var S = {
   progress: load('p', {}), wrong: load('w', {}), fav: load('f', []), logs: load('l', []),
   setting: load('s', { autoNext: false, examCount: 50, examMinutes: 30 }),
-  challenge: load('c', { m: { attempts: {}, cleared: {}, badges: {}, best: {} }, p: { attempts: {}, cleared: {}, best: {} } })
+  challenge: load('c', { m: { attempts: {}, cleared: {}, badges: {}, best: {} }, p: { attempts: {}, cleared: {}, best: {} } }),
+  report: load('r', { name: '', dev: '', queue: [], sent: 0 })
 };
 function load(k, d) { try { var v = localStorage.getItem('hse_' + k); return v ? JSON.parse(v) : d } catch (e) { return d } }
 function save(k, v) { try { localStorage.setItem('hse_' + k, JSON.stringify(v)) } catch (e) {} }
-function saveAll() { save('p', S.progress); save('w', S.wrong); save('f', S.fav); save('l', S.logs); save('s', S.setting); save('c', S.challenge) }
+function saveAll() { save('p', S.progress); save('w', S.wrong); save('f', S.fav); save('l', S.logs); save('s', S.setting); save('c', S.challenge); save('r', S.report) }
 function wrongIds() { return Object.keys(S.wrong).filter(function (k) { return !S.wrong[k].mastered }) }
 function chapterName(id) { var n = id; DB.CHAPTERS.forEach(function (c) { if (c.id === id) n = c.name }); return n }
 function countMap() { var m = {}; DB.QUESTIONS.forEach(function (q) { m[q.c] = (m[q.c] || 0) + 1 }); return m }
@@ -176,6 +187,12 @@ function recordAnswer(q, right) {
   ['attempts', 'cleared', 'badges', 'best'].forEach(function (k) { if (!c.m[k]) { c.m[k] = {}; changed = true } });
   ['attempts', 'cleared', 'best'].forEach(function (k) { if (!c.p[k]) { c.p[k] = {}; changed = true } });
   S.challenge = c
+  var rp = S.report || {}
+  if (!rp.queue) { rp.queue = []; changed = true }
+  if (rp.sent === undefined) { rp.sent = 0; changed = true }
+  if (rp.name === undefined) { rp.name = ''; changed = true }
+  if (rp.dev === undefined) { rp.dev = ''; changed = true }
+  S.report = rp
   if (changed) saveAll();
 })();
 function shuffle(a) { a = a.slice(); for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t } return a }
@@ -266,6 +283,7 @@ function settleMonster(reason) {
   if (passed) { if (!m.cleared[cfg.id]) m.cleared[cfg.id] = Date.now(); if (!m.badges[cfg.id]) m.badges[cfg.id] = Date.now() }
   S.logs.push({ ts: Date.now(), title: '打怪·' + cfg.name, total: q.list.length, correct: q.correct, seconds: sec });
   saveAll();
+  pushReport({ kind: 'monster', title: '第 ' + cfg.id + ' 关 · ' + cfg.name, lv: cfg.id, passed: passed, correct: q.correct, wrong: q.wrong, total: q.list.length, need: need, seconds: sec, attempt: S.challenge.m.attempts[cfg.id] || 1, reason: reason });
   lastChallenge = { kind: 'monster', cfg: cfg, passed: passed, reason: reason, correct: q.correct, wrong: q.wrong, total: q.list.length, need: need, seconds: sec, answered: answered, wrongIds: q.wrongIds.slice() };
   quiz = null; view = 'monsterEnd'; render();
 }
@@ -279,8 +297,59 @@ function settlePaper(reason) {
   if (passed && !p.cleared[cfg.id]) p.cleared[cfg.id] = Date.now();
   S.logs.push({ ts: Date.now(), title: '考试·' + cfg.name, total: q.list.length, correct: q.correct, seconds: sec });
   saveAll();
+  pushReport({ kind: 'paper', title: '第 ' + cfg.id + ' 阶段 · ' + cfg.name, st: cfg.id, passed: passed, correct: q.correct, wrong: q.wrong, total: q.list.length, score: score, seconds: sec, attempt: S.challenge.p.attempts[cfg.id] || 1, reason: reason });
   lastChallenge = { kind: 'paper', cfg: cfg, passed: passed, reason: reason, correct: q.correct, wrong: q.wrong, total: q.list.length, score: score, seconds: sec, answered: answered, wrongIds: q.wrongIds.slice() };
   quiz = null; view = 'paperEnd'; render();
+}
+/* ---------- 成绩上报 ---------- */
+function reportEnabled() { return !!REPORT.endpoint && REPORT.on }
+function deviceId() {
+  if (!S.report.dev) { S.report.dev = 'D' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); saveAll() }
+  return S.report.dev
+}
+function pushReport(rec) {
+  if (!reportEnabled()) return;
+  rec.name = (S.report.name || '').trim() || '匿名同事';
+  rec.dev = deviceId();
+  rec.ts = Date.now();
+  try { rec.at = new Date().toLocaleString('zh-CN', { hour12: false }) } catch (e) { rec.at = new Date().toISOString() }
+  /* 便于飞书/多维表直接拖拽映射的友好字段 */
+  rec.typeName = rec.kind === 'paper' ? '试卷考试' : '通关打怪';
+  rec.result = rec.passed ? '通过' : '未通过';
+  rec.useTime = Math.floor((rec.seconds || 0) / 60) + '分' + ((rec.seconds || 0) % 60) + '秒';
+  rec.reasonText = rec.reason === 'timeout' ? '超时未完成' : rec.reason === 'impossible' ? '错题超出上限' : '正常完成';
+  S.report.queue.push(rec); saveAll();
+  flushReports();
+}
+function flushReports() {
+  if (!reportEnabled() || S.report.sending || !S.report.queue.length) return;
+  S.report.sending = true;
+  var rec = S.report.queue[0], body = JSON.stringify(rec);
+  var finish = function (ok) {
+    S.report.sending = false;
+    if (ok) { S.report.queue.shift(); S.report.sent = (S.report.sent || 0) + 1; saveAll() }
+    if (S.report.queue.length) setTimeout(flushReports, ok ? 300 : 5000);
+  };
+  try {
+    if (REPORT.mode === 'webhook') {
+      /* no-cors：响应不可读，未抛异常即视为送达；失败会留在本地队列下次重试 */
+      fetch(REPORT.endpoint, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: body })
+        .then(function () { finish(true) }).catch(function () { finish(false) });
+    } else {
+      fetch(REPORT.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body })
+        .then(function (r) { finish(r.ok) }).catch(function () { finish(false) });
+    }
+  } catch (e) { finish(false) }
+}
+function reportCard() {
+  var n = S.report.queue.length;
+  var st = !reportEnabled() ? '未配置后台' : (n ? '待上报 ' + n + ' 条' : '已同步');
+  var nm = (S.report.name || '').replace(/"/g, '&quot;');
+  var h = '<div class="card"><div class="between"><div class="title" style="font-size:15px">成绩上报</div><span class="sub">' + st + '</span></div>';
+  h += '<div class="sub" style="margin-top:8px">昵称（管理员在后台靠它认出你）</div>';
+  h += '<div class="row" style="margin-top:8px"><input id="rnick" class="nick" placeholder="填姓名或昵称" value="' + nm + '"><div class="btn" style="width:86px;padding:10px 0;flex:none;margin-left:8px" data-savenick="1">保存</div></div>';
+  h += '<div class="sub" style="margin-top:8px">上报内容：昵称、关卡/阶段、对错题数、用时、是否通过。不含手机号等隐私信息。</div>';
+  return h + '</div>';
 }
 /* ---------- 打怪地图 ---------- */
 function badgeWall() {
@@ -294,7 +363,7 @@ function badgeWall() {
 }
 function viewMonster() {
   var m = S.challenge.m;
-  var h = '<div class="card"><div class="title">通关打怪</div><div class="sub">5 关依次解锁，不可跳关 · 限时内做完且正确率达标才算通关</div>' +
+  var h = (reportEnabled() ? reportCard() : '') + '<div class="card"><div class="title">通关打怪</div><div class="sub">5 关依次解锁，不可跳关 · 限时内做完且正确率达标才算通关</div>' +
     '<div class="stats"><div><b>' + Object.keys(m.cleared).length + '</b><span>已通关</span></div><div><b>' + Object.keys(m.badges).length + '</b><span>徽章</span></div><div><b>' + totalAttempts(m) + '</b><span>挑战次数</span></div></div></div>';
   h += badgeWall();
   MONSTER_LEVELS.forEach(function (c) {
@@ -315,7 +384,7 @@ function viewMonster() {
 /* ---------- 试卷列表 ---------- */
 function viewPaper() {
   var p = S.challenge.p;
-  var h = '<div class="card"><div class="title">试卷考试</div><div class="sub">4 个阶段依次解锁，不可跳考 · 每阶段 100 题 / 60 分钟 / 90 分合格</div>' +
+  var h = (reportEnabled() ? reportCard() : '') + '<div class="card"><div class="title">试卷考试</div><div class="sub">4 个阶段依次解锁，不可跳考 · 每阶段 100 题 / 60 分钟 / 90 分合格</div>' +
     '<div class="stats"><div><b>' + Object.keys(p.cleared).length + '</b><span>已通过</span></div><div><b>4</b><span>总阶段</span></div><div><b>' + totalAttempts(p) + '</b><span>考试次数</span></div></div></div>';
   PAPER_STAGES.forEach(function (c) {
     var ok = paperUnlocked(c.id), done = !!p.cleared[c.id], best = p.best[c.id], att = p.attempts[c.id] || 0;
@@ -566,6 +635,11 @@ function bind() {
     startExam(shuffle(DB.QUESTIONS).slice(0, n), S.setting.examMinutes);
   };
   el.querySelectorAll('[data-monster]').forEach(function (n) { n.onclick = function () { view = 'monster'; render() } });
+  var sn = el.querySelector('[data-savenick]'); if (sn) sn.onclick = function () {
+    var ip = document.getElementById('rnick');
+    S.report.name = (ip && ip.value ? ip.value : '').trim();
+    saveAll(); render(); flushReports();
+  };
   el.querySelectorAll('[data-paper]').forEach(function (n) { n.onclick = function () { view = 'paper'; render() } });
   el.querySelectorAll('[data-mlv]').forEach(function (n) { n.onclick = function () { startMonster(parseInt(n.dataset.mlv, 10)) } });
   el.querySelectorAll('[data-pst]').forEach(function (n) { n.onclick = function () { startPaper(parseInt(n.dataset.pst, 10)) } });
@@ -585,6 +659,7 @@ document.getElementById('tabbar').addEventListener('click', function (e) {
   quiz = null; view = t; render();
 });
 render();
+flushReports();
 </script>
 </body>
 </html>
