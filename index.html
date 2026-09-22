@@ -260,7 +260,7 @@ function startPaper(st) {
   S.challenge.p.attempts[st] = (S.challenge.p.attempts[st] || 0) + 1; saveAll();
   quiz = { list: paperList(st - 1), title: '第 ' + st + ' 阶段 · ' + cfg.name,
     mode: 'paper', cid: null, index: 0, correct: 0, wrong: 0, wrongIds: [], selected: -1, show: false,
-    exam: false, hide: true, timed: true, start: Date.now(), remain: cfg.minutes * 60, st: st };
+    exam: false, hide: true, timed: true, answers: {}, start: Date.now(), remain: cfg.minutes * 60, st: st };
   startTimer(); view = 'quiz'; render();
 }
 function endOfQuiz() {
@@ -298,6 +298,7 @@ function settlePaper(reason) {
   stopTimer();
   var score = q.list.length ? Math.round(q.correct / q.list.length * 100) : 0;
   var passed = (reason === 'done') && (score >= cfg.passScore) && (answered >= q.list.length);
+  recordExamAnswers();
   var sec = Math.round((Date.now() - q.start) / 1000), p = S.challenge.p;
   if (!p.best[cfg.id] || score > p.best[cfg.id].score) p.best[cfg.id] = { score: score, correct: q.correct, total: q.list.length, seconds: sec, at: Date.now() };
   if (passed && !p.cleared[cfg.id]) p.cleared[cfg.id] = Date.now();
@@ -326,6 +327,7 @@ function pushReport(rec) {
   rec.reasonText = rec.reason === 'timeout' ? '超时未完成' : rec.reason === 'impossible' ? '错题超出上限' : '正常完成';
   rec.mirrored = false;
   S.report.queue.push(rec); saveAll();
+  mirrorReport(rec);   /* 台账通道独立发送，不受主通道成败影响 */
   flushReports();
 }
 function botText(r) {
@@ -352,7 +354,6 @@ function flushReports() {
   if (!reportEnabled() || S.report.sending || !S.report.queue.length) return;
   S.report.sending = true;
   var rec = S.report.queue[0], body = reportBody(rec), m = REPORT.mode;
-  mirrorReport(rec);
   var finish = function (ok, note) {
     S.report.sending = false;
     if (note) S.report.lastNote = note;
@@ -438,7 +439,7 @@ function viewPaper() {
     else h += '<div class="btn gray" style="margin-top:10px">需先通过第 ' + (c.id - 1) + ' 阶段</div>';
     h += '</div>';
   });
-  h += '<div class="tips">考试过程中不显示对错；时间到自动交卷，未满 90 分需要重新考试；考试通过后才能进入下一阶段。</div>';
+  h += '<div class="tips">考试过程中不显示对错；选中后可以随时改选，也可点「上一题」回头修改；时间到自动交卷，未满 90 分需要重新考试；通过后才能进入下一阶段。</div>';
   return h;
 }
 /* ---------- 结算页 ---------- */
@@ -512,8 +513,17 @@ function startQuiz(list, title, mode, cid) {
   quiz = { list: list, title: title, mode: mode, cid: cid, index: 0, correct: 0, wrong: 0, wrongIds: [], selected: -1, show: false, exam: false, start: Date.now() };
   view = 'quiz'; render();
 }
+function recordExamAnswers() {
+  /* 考试/试卷模式：交卷时按“最终答案”一次性记入进度与错题本（避免改答案造成重复计数） */
+  if (!quiz || !quiz.answers) return;
+  quiz.list.forEach(function (q, idx) {
+    var sel = quiz.answers[idx];
+    if (sel === undefined || sel === null) return;
+    recordAnswer(q, sel === q.a);
+  });
+}
 function startExam(list, minutes) {
-  quiz = { list: list, title: '模拟测试', mode: 'exam', index: 0, correct: 0, wrong: 0, wrongIds: [], selected: -1, show: false, exam: true, hide: true, timed: true, start: Date.now(), remain: minutes * 60 };
+  quiz = { list: list, title: '模拟测试', mode: 'exam', index: 0, correct: 0, wrong: 0, wrongIds: [], selected: -1, show: false, exam: true, hide: true, timed: true, answers: {}, start: Date.now(), remain: minutes * 60 };
   startTimer();
   view = 'quiz'; render();
 }
@@ -543,17 +553,30 @@ function viewQuiz() {
   h += '</div>';
   h += '<div class="btn ' + (quiz.show || (quiz.hide && quiz.selected >= 0) ? '' : 'gray') + '" data-next="1">' +
     (quiz.index === total - 1 ? (quiz.hide ? '交卷' : (quiz.mode === 'monster' ? '查看结果' : '完成')) : '下一题') + '</div>';
-  if (quiz.index > 0 && quiz.mode !== 'monster' && quiz.mode !== 'paper') h += '<div class="btn ghost" style="margin-top:8px" data-prev="1">上一题</div>';
+  if (quiz.index > 0 && quiz.mode !== 'monster') h += '<div class="btn ghost" style="margin-top:8px" data-prev="1">上一题</div>';
   return h;
 }
 function fmt(s) { var m = Math.floor(s / 60), ss = s % 60; return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss }
 function answer(i) {
-  if (quiz.show) return;
-  if (quiz.hide && quiz.selected >= 0) return;
   var q = quiz.list[quiz.index], right = (i === q.a);
+  if (quiz.hide) {
+    /* 考试 / 试卷：交卷前可以反复改选，改选时先回滚上一次的计数 */
+    if (!quiz.answers) quiz.answers = {};
+    var prev = quiz.answers[quiz.index];
+    if (prev !== undefined && prev !== null) {
+      if (prev === q.a) quiz.correct--;
+      else { quiz.wrong--; var k = quiz.wrongIds.indexOf(q.id); if (k >= 0) quiz.wrongIds.splice(k, 1) }
+    }
+    quiz.answers[quiz.index] = i;
+    quiz.selected = i;
+    if (right) quiz.correct++; else { quiz.wrong++; quiz.wrongIds.push(q.id) }
+    render();
+    return;
+  }
+  if (quiz.show) return;
   quiz.selected = i; if (right) quiz.correct++; else { quiz.wrong++; quiz.wrongIds.push(q.id) }
   recordAnswer(q, right);
-  if (quiz.hide) quiz.show = false; else quiz.show = true;
+  quiz.show = true;
   if (quiz.mode === 'monster') {
     var cfg = MONSTER_LEVELS[quiz.lv - 1];
     if (quiz.wrong > mMaxWrong(cfg)) { settleMonster('impossible'); return }
@@ -566,9 +589,21 @@ function next() {
   if (quiz.index >= quiz.list.length - 1) { endOfQuiz(); return }
   quiz.index++; quiz.selected = -1; quiz.show = false; render();
 }
-function prev() { if (quiz.index <= 0) return; quiz.index--; quiz.selected = -1; quiz.show = false; render() }
+function prev() {
+  if (quiz.index <= 0) return;
+  quiz.index--;
+  if (quiz.hide) {
+    /* 考试 / 试卷：回头时把已选答案恢复出来，方便修改 */
+    var a = quiz.answers ? quiz.answers[quiz.index] : undefined;
+    quiz.selected = (a === undefined || a === null) ? -1 : a;
+  } else {
+    quiz.selected = -1;
+  }
+  quiz.show = false; render();
+}
 function finish() {
   if (quiz.timer) clearInterval(quiz.timer);
+  if (quiz.hide) recordExamAnswers();
   var sec = Math.round((Date.now() - quiz.start) / 1000);
   lastSession = { title: quiz.title, mode: quiz.mode, cid: quiz.cid, total: quiz.list.length, correct: quiz.correct, wrong: quiz.wrong, seconds: sec, wrongIds: quiz.wrongIds, exam: quiz.exam };
   S.logs.push({ ts: Date.now(), title: quiz.title, total: quiz.list.length, correct: quiz.correct, seconds: sec });
@@ -609,7 +644,7 @@ function viewExam() {
   mins.forEach(function (m) { h += '<div class="' + (S.setting.examMinutes === m ? 'on' : '') + '" data-min="' + m + '">' + m + ' 分钟</div>' });
   h += '</div></div>';
   h += '<div class="card"><div class="between"><span class="sub">总题量</span><span>' + DB.QUESTIONS.length + ' 题</span></div><div class="between" style="margin-top:6px"><span class="sub">章节数</span><span>' + DB.CHAPTERS.length + ' 章</span></div></div>';
-  h += '<div class="btn" data-startexam="1">开始测试</div><div class="hint">测试过程中不显示对错，交卷后统一查看成绩与解析</div>';
+  h += '<div class="btn" data-startexam="1">开始测试</div><div class="hint">测试过程中不显示对错，交卷后统一查看成绩与解析；选中后可以随时改选，交卷前都能修改</div>';
   return h;
 }
 function viewWrong() {
